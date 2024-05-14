@@ -9,6 +9,7 @@ class JointDataset(torch.utils.data.Dataset):
 			rna_data,
 			tcr_data,
 			tcr_length,
+			vdj_data,
 			metadata,
 			labels=None,
 			conditional=None
@@ -17,10 +18,12 @@ class JointDataset(torch.utils.data.Dataset):
 		:param rna_data: list of gene expressions, where each element is a numpy or sparse matrix of one dataset
 		:param tcr_data: list of seq_data, where each element is a seq_list of one dataset
 		:param tcr_length: list of non-padded sequence length, needed for many architectures to mask the padding out
+		:param vdj_data: list of vdj gene expression #TODO OHE or not?
 		:param metadata: list of metadata
 		:param labels: list of labels
 		:param conditional: list of conditionales
 		"""
+		#TODO make modalities modular, fixate TCR, if RNA, if VDJ, if CITESEQ, ...
 		self.metadata = metadata.tolist()
 		self.tcr_length = torch.LongTensor(tcr_length)
 
