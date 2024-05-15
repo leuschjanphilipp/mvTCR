@@ -6,11 +6,12 @@ from scipy import sparse
 class JointDataset(torch.utils.data.Dataset):
 	def __init__(
 			self,
-			rna_data,
 			tcr_data,
 			tcr_length,
-			vdj_data,
-			metadata,
+			rna_data=None,
+			vdj_data=None,
+			citeseq_data=None,
+			obs_metadata=None,
 			labels=None,
 			conditional=None
 	):
@@ -18,33 +19,49 @@ class JointDataset(torch.utils.data.Dataset):
 		:param rna_data: list of gene expressions, where each element is a numpy or sparse matrix of one dataset
 		:param tcr_data: list of seq_data, where each element is a seq_list of one dataset
 		:param tcr_length: list of non-padded sequence length, needed for many architectures to mask the padding out
-		:param vdj_data: list of vdj gene expression #TODO OHE or not?
+		:param vdj_data: list of vdj gene expression ohe encoded
 		:param metadata: list of metadata
 		:param labels: list of labels
 		:param conditional: list of conditionales
 		"""
-		#TODO make modalities modular, fixate TCR, if RNA, if VDJ, if CITESEQ, ...
-		self.metadata = metadata.tolist()
+		
 		self.tcr_length = torch.LongTensor(tcr_length)
+		self.tcr_data = torch.LongTensor(tcr_data)
+
+		if rna_data is not None:
+			self.rna_data = self._create_tensor(rna_data)
+		else:
+			self.rna_data = torch.BoolTensor([False] * self.tcr_data.shape[0])
+
+		if vdj_data is not None:
+			self.vjd_data = torch.LongTensor(vdj_data)
+		else:
+			self.vjd_data = torch.BoolTensor([False] * self.tcr_data.shape[0])
+		
+		if citeseq_data is not None:
+			self.citeseq_data = torch.LongTensor(citeseq_data)
+		else:
+			self.citeseq_data = torch.BoolTensor([False] * self.tcr_data.shape[0])
+
+		if obs_metadata is not None:
+			self.metadata = obs_metadata.tolist()
+		else:
+			self.metadata = torch.BoolTensor([False] * self.tcr_data.shape[0])
+
+		if labels is not None:
+			self.labels = torch.LongTensor(labels)
+		else:
+			self.labels = torch.BoolTensor([False] * self.tcr_data.shape[0])
 
 		if conditional is not None:
 			# Reduce the one-hot-encoding back to labels
 			self.conditional = torch.LongTensor(conditional.argmax(1))
 		# LongTensor since it is going to be embedded
 		else:
-			self.conditional = None
+			self.conditional = torch.BoolTensor([False] * self.tcr_data.shape[0])
 
-		self.rna_data = self.create_tensor(rna_data)
-		# self.size_factors = self.rna_data.sum(1)
 
-		self.tcr_data = torch.LongTensor(tcr_data)
-
-		if labels is not None:
-			self.labels = torch.LongTensor(labels)
-		else:
-			self.labels = None
-
-	def create_tensor(self, x):
+	def _create_tensor(self, x):
 		if sparse.issparse(x):
 			x = x.todense()
 			return torch.FloatTensor(x)
@@ -52,23 +69,11 @@ class JointDataset(torch.utils.data.Dataset):
 			return torch.FloatTensor(x)
 
 	def __len__(self):
-		return len(self.rna_data)
+		return self.tcr_data.shape[0]
 
 	def __getitem__(self, idx):
-		if self.labels is None:
-			if self.conditional is None:
-				return self.rna_data[idx], self.tcr_data[idx], self.tcr_length[idx], \
-					   self.metadata[idx], False, False
-			else:
-				return self.rna_data[idx], self.tcr_data[idx], self.tcr_length[idx], \
-					   self.metadata[idx], False, self.conditional[idx]
-		else:
-			if self.conditional is None:
-				return self.rna_data[idx], self.tcr_data[idx], self.tcr_length[idx], \
-					   self.metadata[idx], self.labels[idx], False
-			else:
-				return self.rna_data[idx], self.tcr_data[idx], self.tcr_length[idx], \
-					   self.metadata[idx], self.labels[idx], self.conditional[idx]
+		return self.tcr_data[idx], self.rna_data[idx], self.vjd_data[idx], self.citeseq_data[idx], \
+			   self.labels[idx], self.conditional[idx]
 
 
 class DeepTCRDataset(torch.utils.data.Dataset):
