@@ -28,13 +28,8 @@ from .optimization.pseudo_metric import report_pseudo_metric
 class VAEBaseModel(ABC):
 	def __init__(self,
 				 adata,
-				 params_architecture,
-				 balanced_sampling='clonotype',
-				 metadata=None,
-				 conditional=None,
-				 optimization_mode_params=None,
-				 label_key=None,
-				 device=None):
+				 params_experiment,
+				 params_architecture):
 		"""
 		VAE Base Model, used for both single and joint models
 		:param adata: list of adatas containing train and val set
@@ -45,31 +40,40 @@ class VAEBaseModel(ABC):
 		"""
 		self.adata = adata
 		self.params_architecture = params_architecture
-		self.balanced_sampling = balanced_sampling
-		self.metadata = metadata
-		self.conditional = conditional
-		self.optimization_mode_params = optimization_mode_params
-		self.label_key = label_key
-		self.device = device
+		self.balanced_sampling = params_experiment["balanced_sampling"]
+		self.metadata = params_experiment["metadata"]
+		self.conditional = params_experiment["conditional"]
+		self.optimization_method = params_experiment["optimization_method"]
+		self.prediction_key = params_experiment["prediction_key"]
+		#self.optimization_mode_params = optimization_mode_params
+		self.label_key = params_experiment["label_key"]
+		self.device = params_experiment["device"]
+		self.set_key = params_experiment["set_key"]
 
-		self.params_tcr = None
-		self.params_rna = None
-		self.params_joint = params_architecture['joint']
+		self.params_tcr = params_architecture['tcr']
+		self.params_rna = params_architecture['rna']
+		self.params_vdj = None
+		self.params_citeseq = None
 		self.params_supervised = None
-		self.beta_only = False
+		self.params_joint = params_architecture['joint']
+		#self.beta_only = False
 
-		if 'tcr' in params_architecture:
-			self.params_tcr = params_architecture['tcr']
-			if 'beta_only' in self.params_tcr:
-				self.beta_only = self.params_tcr['beta_only']
-		if 'rna' in params_architecture:
-			self.params_rna = params_architecture['rna']
+		self.tcr_chain = params_experiment["tcr_chain"]
+		self.use_vdj = False
+		self.use_citeseq = False
+
+		if params_experiment["use_vdj"]:
+			self.params_vdj = params_architecture["vdj"]
+			self.use_vdj = True
+		if params_experiment["use_citeseq"]:
+			self.params_citeseq = params_architecture["citeseq"]
+			self.use_citeseq = True
+
+		#TODO
 		if 'supervised' in params_architecture:
 			self.params_supervised = params_architecture['supervised']
 
-		if self.params_tcr is None and self.params_rna is None:
-			raise ValueError('Please specify either tcr, rna, or both hyperparameters.')
-
+		
 		self.aa_to_id = adata.uns['aa_to_id']
 
 		if self.device is None:
@@ -84,10 +88,15 @@ class VAEBaseModel(ABC):
 		self.no_improvements = 0
 
 		# loss functions
-		self.loss_function_rna = nn.MSELoss()
 		self.loss_function_tcr = nn.CrossEntropyLoss(ignore_index=self.aa_to_id['_'])
+		self.loss_function_rna = nn.MSELoss()
 		self.loss_function_kld = KLD()
 		self.loss_function_class = nn.CrossEntropyLoss()
+		if self.use_vdj:
+			self.loss_function_vdj = nn.MSELoss()
+		#TODO else None?
+		if self.use_citeseq:
+			self.loss_function_citeseq = nn.MSELoss()
 
 		# training params
 		self.batch_size = params_architecture['batch_size']
@@ -101,41 +110,26 @@ class VAEBaseModel(ABC):
 		self.optimizer = None
 		self.supervised_model = None
 		if self.label_key is not None:
-			assert self.params_supervised is not None, 'Please specify parameters for supervised model'
-
-			hidden_neurons = [self.params_supervised['hidden_neurons']] * self.params_supervised['num_hidden_layers']
-			hidden_neurons = [self.params_joint['zdim']] + hidden_neurons + [
-				max(7, adata.obs[label_key].unique().max() + 1)]
-
-			layers = []
-			for i in range(len(hidden_neurons) - 2):
-				layers.append(nn.Linear(hidden_neurons[i], hidden_neurons[i + 1]))
-				if self.params_supervised['batch_norm']:
-					layers.append(nn.BatchNorm1d(hidden_neurons[i + 1]))
-				if self.params_supervised['activation'] == 'relu':
-					layers.append(nn.ReLU())
-				elif self.params_supervised['activation'] == 'tanh':
-					layers.append(nn.Tanh())
-				elif self.params_supervised['activation'] == 'sigmoid':
-					layers.append(nn.Sigmoid())
-				elif self.params_supervised['activation'] == 'linear':
-					pass
-				else:
-					raise ValueError(f'Invalid activation: {self.params_supervised["activation"]}')
-				if self.params_supervised['dropout'] > 0:
-					layers.append(nn.Dropout(self.params_supervised['dropout']))
-
-			layers.append(nn.Linear(hidden_neurons[-2], hidden_neurons[-1]))
-			self.supervised_model = nn.Sequential(*layers)
+			self.supervised_model = self._build_supervised_head(label_key=self.label_key)
 
 		# datasets
-		if metadata is None:
-			metadata = []
-		if balanced_sampling is not None and balanced_sampling not in metadata:
-			metadata.append(balanced_sampling)
-		self.data_train, self.data_val = initialize_data_loader(adata, metadata, conditional, label_key,
-																balanced_sampling, self.batch_size,
-																beta_only=self.beta_only)
+		if self.metadata is None:
+			self.metadata = []
+		if self.balanced_sampling is not None and self.balanced_sampling not in self.metadata:
+			self.metadata.append(self.balanced_sampling)
+
+		#adata, use_vdj, use_citeseq, metadata, conditional, label_key, balanced_sampling, batch_size
+		self.data_train, self.data_val = initialize_data_loader(adata=adata,
+														  		obs_set_key=self.set_key,
+																tcr_chain=self.tcr_chain,
+														  		use_vdj=self.use_vdj,
+																use_citeseq=self.use_citeseq,
+																metadata=self.metadata,
+																conditional=self.conditional,
+																label_key=self.label_key,
+																balanced_sampling=self.balanced_sampling,
+																batch_size=self.batch_size)
+
 
 	def change_adata(self, new_adata):
 		self.adata = new_adata
@@ -473,6 +467,34 @@ class VAEBaseModel(ABC):
 		return ys
 
 	# <- semi-supervised model ->
+	def _build_supervised_head(self, label_key):
+		assert self.params_supervised is not None, 'Please specify parameters for supervised model'
+
+		hidden_neurons = [self.params_supervised['hidden_neurons']] * self.params_supervised['num_hidden_layers']
+		hidden_neurons = [self.params_joint['zdim']] + hidden_neurons + [
+			max(7, self.adata.obs[label_key].unique().max() + 1)]
+
+		layers = []
+		for i in range(len(hidden_neurons) - 2):
+			layers.append(nn.Linear(hidden_neurons[i], hidden_neurons[i + 1]))
+			if self.params_supervised['batch_norm']:
+				layers.append(nn.BatchNorm1d(hidden_neurons[i + 1]))
+			if self.params_supervised['activation'] == 'relu':
+				layers.append(nn.ReLU())
+			elif self.params_supervised['activation'] == 'tanh':
+				layers.append(nn.Tanh())
+			elif self.params_supervised['activation'] == 'sigmoid':
+				layers.append(nn.Sigmoid())
+			elif self.params_supervised['activation'] == 'linear':
+				pass
+			else:
+				raise ValueError(f'Invalid activation: {self.params_supervised["activation"]}')
+			if self.params_supervised['dropout'] > 0:
+				layers.append(nn.Dropout(self.params_supervised['dropout']))
+
+		layers.append(nn.Linear(hidden_neurons[-2], hidden_neurons[-1]))
+		return nn.Sequential(*layers)
+
 	def forward_supervised(self, z):
 		z_ = self.model.get_latent_from_z(z)
 		prediction = self.supervised_model(z_)

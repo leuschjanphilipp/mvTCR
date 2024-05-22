@@ -71,7 +71,21 @@ def fail_save(func):
                 return 5.
     return wrapper
 
+def objective(trial, adata, params_experiment):
+    adata = adata.copy()
+    params_experiment = params_experiment.copy()
+    params_experiment = complete_params_experiment(params_experiment)
+    params_experiment['save_path'] = os.path.join(params_experiment['save_path'], f'trial_{trial.number}')
 
+    suggest_params = get_parameter_functions(params_experiment["architecture"], params_experiment["optimization_method"])
+    params_architecture = suggest_params(trial)
+
+    model = utils.select_model_by_name(params_experiment['architecture'])
+    model = model(adata, params_experiment, params_architecture)
+
+    return model.best_optimization_metric    
+
+'''
 #@fail_save
 def objective(trial, adata_tmp, suggest_params, params_experiment_base, optimization_mode_params):
     adata = adata_tmp.copy()
@@ -122,7 +136,8 @@ def objective(trial, adata_tmp, suggest_params, params_experiment_base, optimiza
                         comet.log_figure(f'{title}_{group}', fig)
         comet.end()
     return model.best_optimization_metric
-
+'''
+    
 @check_if_input_is_mudata
 def run_model_selection(adata, 
                         params_experiment, 
@@ -147,9 +162,9 @@ def run_model_selection(adata,
     study = optuna.create_study(study_name=params_experiment['study_name'], sampler=sampler, storage=storage,
                                 direction=direction, load_if_exists=False)
 
-    suggest_params = get_parameter_functions(params_experiment['model_name'], params_optimization['name'])
+    #suggest_params = get_parameter_functions(params_experiment['model_name'], params_optimization['name'])
     # study.enqueue_trial(init_params)
-    study.optimize(lambda trial: objective(trial, adata, suggest_params, params_experiment, params_optimization),
+    study.optimize(lambda trial: objective(trial, adata, params_experiment),
                    n_trials=num_samples, timeout=timeout, n_jobs=n_jobs)
 
     try:

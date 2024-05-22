@@ -11,12 +11,26 @@ from mvtcr.dataloader.DataLoader import initialize_prediction_loader
 
 
 class MoEModelTorch(nn.Module):
-    def __init__(self, tcr_params, rna_params, joint_params):
+    def __init__(self, tcr_params, rna_params, vdj_params, citeseq_params, joint_params):
         super(MoEModelTorch, self).__init__()
-        self.beta_only = 'beta_only' in tcr_params and tcr_params['beta_only']
-        self.amount_chains = 1 if self.beta_only else 2
+        
+        self.tcr_chain = tcr_params['tcr_chain']
+        self.use_vdj = True if vdj_params is not None else False
+        self.use_citeseq = True if citeseq_params is not None else False
+        
+        self.amount_chains = 1 if self.tcr_chain != "both" else 2
+
+        num_seq_labels = tcr_params['num_seq_labels']
 
         xdim = rna_params['xdim']
+
+        emb_dim = vdj_params["vdj_embedding_dim"]
+        num_v_alpha_labels = vdj_params["num_v_alpha_labels"]
+        num_j_alpha_labels = vdj_params["num_j_alpha_labels"]
+        num_v_beta_labels = vdj_params["num_v_beta_labels"]
+        num_d_beta_labels = vdj_params["num_d_beta_labels"]
+        num_j_beta_labels = vdj_params["num_j_beta_labels"]
+
         hdim = joint_params['hdim']
         num_conditional_labels = joint_params['num_conditional_labels']
         cond_dim = joint_params['cond_dim']
@@ -29,10 +43,12 @@ class MoEModelTorch(nn.Module):
         use_embedding_for_cond = joint_params[
             'use_embedding_for_cond'] if 'use_embedding_for_cond' in joint_params else True
 
-        num_seq_labels = tcr_params['num_seq_labels']
+        # used for NB loss
+        self.theta = torch.nn.Parameter(torch.randn(xdim))
 
-        if not self.beta_only:
-            self.alpha_encoder = TransformerEncoder(tcr_params, hdim // 2, num_seq_labels)
+        #if both chains; second transformer
+        if self.amount_chains == 2:
+            self.alpha_encoder = TransformerEncoder(tcr_params, hdim // self.amount_chains, num_seq_labels)
             self.alpha_decoder = TransformerDecoder(tcr_params, hdim, num_seq_labels)
 
         self.beta_encoder = TransformerEncoder(tcr_params, hdim // self.amount_chains, num_seq_labels)
@@ -41,12 +57,14 @@ class MoEModelTorch(nn.Module):
         self.rna_encoder = build_mlp_encoder(rna_params, xdim, hdim)
         self.rna_decoder = build_mlp_decoder(rna_params, xdim, hdim)
 
+        #conditional
         if cond_dim > 0:
             if use_embedding_for_cond:
                 self.cond_emb = torch.nn.Embedding(num_conditional_labels, cond_dim)
             else:  # use one hot encoding
                 self.cond_emb = None
                 cond_dim = num_conditional_labels
+                
         self.cond_input = cond_input
         self.use_embedding_for_cond = use_embedding_for_cond
         self.num_conditional_labels = num_conditional_labels
@@ -62,10 +80,41 @@ class MoEModelTorch(nn.Module):
         self.rna_vae_decoder = MLP(zdim + cond_dim, hdim, shared_hidden[::-1], activation, activation, dropout,
                                    batch_norm, regularize_last_layer=True)
 
-        # used for NB loss
-        self.theta = torch.nn.Parameter(torch.randn(xdim))
+        #VDJ modality
+        if self.use_vdj:
+            self.embedding_v_alpha = nn.Embedding(num_embeddings=num_v_alpha_labels, embedding_dim=emb_dim)
+            self.embedding_j_alpha = nn.Embedding(num_embeddings=num_j_alpha_labels, embedding_dim=emb_dim)
+            self.embedding_v_beta = nn.Embedding(num_embeddings=num_v_beta_labels, embedding_dim=emb_dim)
+            self.embedding_d_beta = nn.Embedding(num_embeddings=num_d_beta_labels, embedding_dim=emb_dim)
+            self.embedding_j_beta = nn.Embedding(num_embeddings=num_j_beta_labels, embedding_dim=emb_dim)
 
-    def forward(self, rna, tcr, tcr_len, conditional=None):
+            self.vdj_encoder = build_mlp_encoder(vdj_params, emb_dim*5, hdim)
+            self.vdj_decoder = build_mlp_decoder(vdj_params, emb_dim*5, hdim)
+            
+            self.vdj_vae_encoder = MLP(hdim + cond_input_dim, 
+                                       zdim * 2, 
+                                       shared_hidden, 
+                                       activation, 
+                                       'linear', 
+                                       dropout,
+                                       batch_norm, 
+                                       regularize_last_layer=False)
+            
+            self.vdj_vae_decoder = MLP(zdim + cond_dim, 
+                                       hdim, 
+                                       shared_hidden[::-1], 
+                                       activation, 
+                                       activation, 
+                                       dropout,
+                                       batch_norm, 
+                                       regularize_last_layer=True)
+
+        # CiteSeq modality
+        if self.use_citeseq:
+            pass
+
+
+    def forward(self, rna, tcr, tcr_len, vdj, citeseq, conditional=None):
         """
 		Forward pass of autoencoder
 		:param rna: torch.Tensor shape=[batch_size, num_genes]
@@ -79,29 +128,30 @@ class MoEModelTorch(nn.Module):
 			rna_pred: list of reconstructed rna. rna_pred = [rna_pred using z_rna, rna_pred using z_joint]
 			tcr_pred: list of reconstructed tcr. tcr_pred = [tcr_pred using z_tcr, tcr_pred using z_joint]
 		"""
-        if conditional is not None:
-            cond_emb_vec = self.cond_emb(conditional) if self.use_embedding_for_cond else torch.nn.functional.one_hot(
-                conditional, self.num_conditional_labels)
         # Encode TCR
-
-        beta_seq = tcr[:, tcr.shape[1] // 2 * (self.amount_chains == 2):]
-        beta_len = tcr_len[:, self.amount_chains - 1]
-        h_beta = self.beta_encoder(beta_seq, beta_len)  # shape=[batch_size, hdim//2]
-
-        if not self.beta_only:
-            alpha_seq = tcr[:, :tcr.shape[1] // 2]
+        if self.amount_chains != 1:
+            #TODO check if tcr = cat(a, b) or cat(b, a)
+            alpha_seq =  tcr[:, tcr.shape[1] // 2:]
             alpha_len = tcr_len[:, 0]
+            beta_seq = tcr[:, :tcr.shape[1] // 2]
+            beta_len = tcr_len[:, 1]
+
+            h_beta = self.beta_encoder(beta_seq, beta_len)  # shape=[batch_size, hdim//2]
             h_alpha = self.alpha_encoder(alpha_seq, alpha_len)  # shape=[batch_size, hdim//2]
             h_tcr = torch.cat([h_alpha, h_beta], dim=-1)  # shape=[batch_size, hdim]
         else:
-            h_tcr = torch.cat([h_beta], dim=-1)
-
-        if conditional is not None and self.cond_input:
-            h_tcr = torch.cat([h_tcr, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
+            #TODO check input to encoder
+            h_beta = self.beta_encoder(tcr, tcr_len)  # shape=[batch_size, hdim//2]
+            h_tcr = torch.cat([h_beta], dim=-1)  # shape=[batch_size, hdim]
 
         # Encode RNA
         h_rna = self.rna_encoder(rna)  # shape=[batch_size, hdim]
+
         if conditional is not None and self.cond_input:
+            cond_emb_vec = self.cond_emb(conditional) if self.use_embedding_for_cond else \
+                torch.nn.functional.one_hot(conditional, self.num_conditional_labels)
+
+            h_tcr = torch.cat([h_tcr, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
             h_rna = torch.cat([h_rna, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
 
         # Predict Latent space
@@ -113,30 +163,70 @@ class MoEModelTorch(nn.Module):
         mu_tcr, logvar_tcr = z_tcr_[:, :z_tcr_.shape[1] // 2], z_tcr_[:, z_tcr_.shape[1] // 2:]
         z_tcr = self.reparameterize(mu_tcr, logvar_tcr)  # shape=[batch_size, zdim]
 
-        z = [z_rna, z_tcr]
-        mu = [mu_rna, mu_tcr]
-        logvar = [logvar_rna, logvar_tcr]
+        z = {"rna": z_rna, "tcr": z_tcr}
+        mu = {"rna": mu_rna, "tcr": mu_tcr}
+        #TODO logvar != diag of Cov? which to use
+        logvar = {"rna": z_rna, "tcr": z_tcr}
 
-        # Reconstruction
-        rna_pred = []
-        for z_ in z:
+        if self.use_vdj:
+            # Encode VDJ
+            h_v_alpha = self.embedding_v_alpha(vdj["v_alpha"])
+            h_j_alpha = self.embedding_j_alpha(vdj["j_alpha"])
+            h_v_beta = self.embedding_v_beta(vdj["v_beta"])
+            h_d_beta = self.embedding_d_beta(vdj["d_beta"])
+            h_j_beta = self.embedding_j_beta(vdj["j_beta"])
+            h_vdj = self.vdj_encoder(torch.cat(h_v_alpha, h_j_alpha, h_v_beta, h_d_beta, h_j_beta))
+            # Conditional
+            if conditional is not None and self.cond_input:
+                h_vdj = torch.cat([h_vdj, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
+            # Predict Latent space
+            z_vdj_ = self.vdj_vae_encoder(h_vdj) # shape=[batch_size, zdim*2]
+            mu_vdj, logvar_vdj = z_vdj_[:, :z_vdj_.shape[1] // 2], z_vdj_[:, z_vdj_.shape[1] // 2:]
+            z_vdj = self.reparametrize(mu_vdj, logvar_vdj)
+            z["vdj"] = z_vdj
+            mu["vdj"] = mu_vdj
+            logvar["vdj"] = logvar_vdj
+        
+        #TODO
+        if self.use_citeseq:
+            # Encode CiteSeq
+            pass
+            # Conditional
+            # Predict latent space
+
+
+        #Reconstruction
+        predictions = dict()
+        for z_ in z.values():
+            # Conditional
             if conditional is not None:
                 z_ = torch.cat([z_, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
-            f_rna = self.rna_vae_decoder(z_)
-            rna_pred.append(self.rna_decoder(f_rna))
-        tcr_pred = []
-        for z_ in z:
-            if conditional is not None:
-                z_ = torch.cat([z_, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
+
+            # TCR
             f_tcr = self.tcr_vae_decoder(z_)
-            beta_pred = self.beta_decoder(f_tcr, beta_seq)
-
-            if not self.beta_only:
+            if self.amount_chains != 1:
+                beta_pred = self.beta_decoder(f_tcr, beta_seq)
                 alpha_pred = self.alpha_decoder(f_tcr, alpha_seq)
-                tcr_pred.append(torch.cat([alpha_pred, beta_pred], dim=1))
+                tcr_pred = torch.cat([alpha_pred, beta_pred], dim=1)
             else:
-                tcr_pred.append(torch.cat([beta_pred], dim=1))
-        return z, mu, logvar, rna_pred, tcr_pred
+                tcr_pred = self.beta_decoder(f_tcr, beta_seq)
+            predictions["tcr"] = tcr_pred
+
+    	    # RNA
+            f_rna = self.rna_vae_decoder(z_)
+            predictions["rna"] = self.rna_decoder(f_rna)
+
+            # VDJ
+            if self.use_vdj:
+                f_vdj = self.vdj_vae_decoder(z_)
+                predictions["vdj"] = self.vdj_decoder(f_vdj)
+
+            # CiteSeq
+            if self.use_citeseq:
+                predictions["citeseq"] = None
+
+        return z, mu, logvar, predictions
+
 
     def reparameterize(self, mu, log_var):
         """
@@ -144,45 +234,55 @@ class MoEModelTorch(nn.Module):
 		:param mu: mean from the encoder's latent space
 		:param log_var: log variance from the encoder's latent space
 		"""
+        mu = torch.stack(list(mu.values()))
+        log_var = torch.stack(list(log_var.values()))
         std = torch.exp(0.5 * log_var)  # standard deviation
         eps = torch.randn_like(std)  # `randn_like` as we need the same size
         z = mu + (eps * std)  # sampling as if coming from the input space
         return z
+    
+    def get_latent_from_z(self, z):
+        # z.sum(axis=0) / n 
+        return torch.stack(list(z.values())).sum(axis=0) / len(z)
 
-    def predict_transcriptome(self, z_shared, conditional=None):
-        """
-		Predict the transcriptome connected to an shared latent space
-		:param z_shared: torch.tensor, shared latent representation
-		:param conditional:
-		:return: torch.tensor, transcriptome profile
-		"""
+    def predict_modality_from_shared_latent(self, z_shared, modality, conditional=None, tcr_seq=None):
         if conditional is not None:  # more efficient than doing two concatenations
             cond_emb_vec = self.cond_emb(conditional)
             z_shared = torch.cat([z_shared, cond_emb_vec], dim=-1)  # shape=[batch_size, zdim+cond_dim]
-        transcriptome_pred = self.rna_vae_decoder(z_shared)
-        transcriptome_pred = self.rna_decoder(transcriptome_pred)
-        return transcriptome_pred
 
-    def get_latent_from_z(self, z):
-        z = 0.5 * (z[0] + z[1])
-        return z
+        if modality == "tcr":
+            #TODO
+            f_tcr = self.tcr_vae_decoder(z_shared)
+            if self.amount_chains != 1:
+                alpha_pred = self.alpha_decoder(f_tcr, tcr_seq[0])
+                beta_pred = self.beta_decoder(f_tcr, tcr_seq[1])
+                tcr_pred = torch.cat([alpha_pred, beta_pred], dim=1)
+            else:
+                tcr_pred = self.beta_decoder(f_tcr, tcr_seq)
+            prediction = tcr_pred
+        elif modality == "rna":
+            f_rna = self.rna_vae_decoder(z_shared)
+            prediction = self.rna_decoder(f_rna)
+        elif modality == "vdj":
+            f_vdj = self.vdj_vae_decoder(z_shared)
+            prediction = self.vdj_decoder(f_vdj)
+        elif modality == "citeseq":
+            pass
+        else:
+            print("Modality not found. Chose one of {'tcr', 'rna', 'vdj', 'citeseq'}.")
+            prediction = None
+        return prediction
 
 
 class MoEModel(VAEBaseModel):
     def __init__(self,
                  adata,
-                 params_architecture,
-                 balanced_sampling='clonotype',
-                 metadata=None,
-                 conditional=None,
-                 optimization_mode_params=None,
-                 label_key=None,
-                 device=None
-                 ):
-        super(MoEModel, self).__init__(adata, params_architecture, balanced_sampling, metadata,
-                                       conditional, optimization_mode_params, label_key, device)
+                 params_experiment,
+                 params_architecture):
+        super(MoEModel, self).__init__(adata, params_experiment, params_architecture)
         self.model_type = 'moe'
 
+        self.params_tcr["tcr_chain"] = params_experiment["tcr_chain"]
         self.params_tcr['max_tcr_length'] = adata.obsm['alpha_seq'].shape[1]
         self.params_tcr['num_seq_labels'] = len(self.aa_to_id)
 
@@ -201,9 +301,17 @@ class MoEModel(VAEBaseModel):
                 cond_dim = self.params_joint['c_embedding_dim']
         self.params_joint['num_conditional_labels'] = num_conditional_labels
         self.params_joint['cond_dim'] = cond_dim
-        self.params_joint['cond_input'] = conditional is not None
+        self.params_joint['cond_input'] = self.conditional is not None
 
-        self.model = MoEModelTorch(self.params_tcr, self.params_rna, self.params_joint)
+        self.params_vdj["num_v_alpha_labels"] = adata.obs["VJ_1_v_call"].max() + 1 #number of labels in categorical col
+        self.params_vdj["num_j_alpha_labels"] = adata.obs["VJ_1_j_call"].max() + 1
+        self.params_vdj["num_v_beta_labels"] = adata.obs["VDJ_1_v_call"].max() + 1
+        self.params_vdj["num_d_beta_labels"] = adata.obs["VDJ_1_d_call"].max() + 1
+        self.params_vdj["num_j_beta_labels"] = adata.obs["VDJ_1_j_call"].max() + 1
+        
+        #TODO self.params_citeseq["placeholder"] = None
+
+        self.model = MoEModelTorch(self.params_tcr, self.params_rna, self.params_vdj, self.params_citeseq, self.params_joint)
 
     def calculate_loss(self, rna_pred, rna, tcr_pred, tcr):
         rna_loss = self.loss_function_rna(rna_pred[0], rna) + self.loss_function_rna(rna_pred[1], rna)

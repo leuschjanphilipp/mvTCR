@@ -8,7 +8,7 @@ class JointDataset(torch.utils.data.Dataset):
 			self,
 			tcr_data,
 			tcr_length,
-			rna_data=None,
+			rna_data,
 			vdj_data=None,
 			citeseq_data=None,
 			obs_metadata=None,
@@ -28,38 +28,24 @@ class JointDataset(torch.utils.data.Dataset):
 		self.tcr_length = torch.LongTensor(tcr_length)
 		self.tcr_data = torch.LongTensor(tcr_data)
 
-		if rna_data is not None:
-			self.rna_data = self._create_tensor(rna_data)
-		else:
-			self.rna_data = torch.BoolTensor([False] * self.tcr_data.shape[0])
+		self.rna_data = self._create_tensor(rna_data)
 
 		if vdj_data is not None:
 			self.vjd_data = torch.LongTensor(vdj_data)
-		else:
-			self.vjd_data = torch.BoolTensor([False] * self.tcr_data.shape[0])
 		
 		if citeseq_data is not None:
 			self.citeseq_data = torch.LongTensor(citeseq_data)
-		else:
-			self.citeseq_data = torch.BoolTensor([False] * self.tcr_data.shape[0])
 
 		if obs_metadata is not None:
 			self.metadata = obs_metadata.tolist()
-		else:
-			self.metadata = torch.BoolTensor([False] * self.tcr_data.shape[0])
 
 		if labels is not None:
 			self.labels = torch.LongTensor(labels)
-		else:
-			self.labels = torch.BoolTensor([False] * self.tcr_data.shape[0])
 
 		if conditional is not None:
 			# Reduce the one-hot-encoding back to labels
+			# LongTensor since it is going to be embedded
 			self.conditional = torch.LongTensor(conditional.argmax(1))
-		# LongTensor since it is going to be embedded
-		else:
-			self.conditional = torch.BoolTensor([False] * self.tcr_data.shape[0])
-
 
 	def _create_tensor(self, x):
 		if sparse.issparse(x):
@@ -72,8 +58,12 @@ class JointDataset(torch.utils.data.Dataset):
 		return self.tcr_data.shape[0]
 
 	def __getitem__(self, idx):
-		return self.tcr_data[idx], self.rna_data[idx], self.vjd_data[idx], self.citeseq_data[idx], \
-			   self.labels[idx], self.conditional[idx]
+		return {"tcr": self.tcr_data[idx], 
+		  		"rna": self.rna_data[idx], 
+				"vdj": self.vjd_data[idx],
+				"citeseq": self.citeseq_data[idx], 
+			    "labels": self.labels[idx], 
+			    "conditional": self.conditional[idx]}
 
 
 class DeepTCRDataset(torch.utils.data.Dataset):

@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler, TensorDataset
 from mvtcr.dataloader.Dataset import JointDataset
 
 
-def create_datasets(adata, obs_set_key, tcr_chains, use_rna, use_vdj, use_citeseq,                    
+def create_datasets(adata, obs_set_key, tcr_chain, use_vdj, use_citeseq,                    
                     metadata=None, conditional=None, labels=None):
     """
     Create torch Dataset, see above for the input
@@ -26,17 +26,17 @@ def create_datasets(adata, obs_set_key, tcr_chains, use_rna, use_vdj, use_citese
     else:
         train_mask = np.array([True] * adata.obs.shape[0])
     
-    if tcr_chains == "alpha":
+    if tcr_chain == "alpha":
         tcr_seq = adata.obsm['alpha_seq']
         tcr_length = np.column_stack([adata.obs['alpha_len']])
-    elif tcr_chains == "beta":
+    elif tcr_chain == "beta":
         tcr_seq = adata.obsm['beta_seq']
         tcr_length = np.column_stack([adata.obs['beta_len']])
-    elif tcr_chains == "both":
+    elif tcr_chain == "both":
         tcr_seq = np.concatenate([adata.obsm['alpha_seq'], adata.obsm['beta_seq']], axis=1)
         tcr_length = np.column_stack([adata.obs['alpha_len'], adata.obs['beta_len']])
     else:
-        print("tcr_chains mode not supported. Chose one of {'alpha', 'beta', 'both'}.")
+        print("tcr_chain mode not supported. Chose one of {'alpha', 'beta', 'both'}.")
 
     tcr_train = tcr_seq[train_mask]
     tcr_val = tcr_seq[~train_mask]
@@ -45,23 +45,25 @@ def create_datasets(adata, obs_set_key, tcr_chains, use_rna, use_vdj, use_citese
     tcr_length_val = tcr_length[~train_mask].tolist()
 
     # Save dataset splits
-    if use_rna:
-        rna_train = adata.X[train_mask]
-        rna_val = adata.X[~train_mask]
-    else:
-        rna_train, rna_val = None, None
-    
+    rna_train = adata.X[train_mask]
+    rna_val = adata.X[~train_mask]
+
     if use_vdj:
         vdj_data = ir.get.airr(adata, ["v_call", "d_call", "j_call"]).copy()
-        #how to handle nans?
-        vdj_data = pd.get_dummies(vdj_data, columns=["VJ_1_v_call", "VJ_1_j_call", "VDJ_1_v_call", "VDJ_1_d_call", "VDJ_1_j_call"], dtype=int).to_numpy()
+        #vdj_data = pd.get_dummies(vdj_data, columns=["VJ_1_v_call", "VJ_1_j_call", "VDJ_1_v_call", "VDJ_1_d_call", "VDJ_1_j_call"], dtype=int).to_numpy()
+        for col in vdj_data.columns:
+            unique_values = vdj_data[col].unique()
+            mapping = {val: idx for idx, val in enumerate(unique_values)}
+            vdj_data[col] = vdj_data[col].map(mapping)
+        vdj_data = vdj_data.to_numpy() #np array 5 genes x cells
+        
         vdj_train = vdj_data[train_mask]
         vdj_val = vdj_data[~train_mask]
     else:
         vdj_train, vdj_val = None, None
     
     if use_citeseq:
-        #TODO
+        #TODO haniffa, normalize with clr
         citeseq_train, citeseq_val = None, None
     else:
         citeseq_train, citeseq_val = None, None
@@ -90,6 +92,7 @@ def create_datasets(adata, obs_set_key, tcr_chains, use_rna, use_vdj, use_citese
                                  labels_train, conditional_train)
     val_dataset = JointDataset(tcr_val, tcr_length_val, rna_val, vdj_val, citeseq_val, metadata_val,
                                  labels_val, conditional_val)
+    #TODO why train mask return? --> sampling weights
     return train_dataset, val_dataset, train_mask
 
 
@@ -100,10 +103,15 @@ def seed_worker(worker_id):
 
 
 # <- functions for the main data loader ->
-def initialize_data_loader(adata, use_rna, use_vdj, use_citeseq, metadata, conditional, label_key, balanced_sampling, batch_size):
+def initialize_data_loader(adata, obs_set_key, tcr_chain, use_vdj, use_citeseq, metadata, conditional, label_key, balanced_sampling, batch_size):
     
-    train_datasets, val_datasets, train_mask = create_datasets(adata, obs_set_key='set', use_rna=use_rna, use_vdj=use_vdj, 
-                                                               use_citeseq=use_citeseq, metadata=metadata, conditional=conditional, 
+    train_datasets, val_datasets, train_mask = create_datasets(adata, 
+                                                               obs_set_key=obs_set_key,
+                                                               tcr_chain=tcr_chain,
+                                                               use_vdj=use_vdj, 
+                                                               use_citeseq=use_citeseq, 
+                                                               metadata=metadata, 
+                                                               conditional=conditional, 
                                                                labels=label_key)
 
     if balanced_sampling is None:
@@ -140,10 +148,15 @@ def calculate_sampling_weights(adata, train_mask, class_column):
 
 
 # <- data loader for prediction ->
-def initialize_prediction_loader(adata, use_rna, use_vdj, use_citeseq, metadata, batch_size, beta_only=False, conditional=None):
-    prediction_dataset, _, _ = create_datasets(adata, obs_set_key=None, use_rna=use_rna, use_vdj=use_vdj, 
-                                                               use_citeseq=use_citeseq, metadata=metadata, conditional=conditional, 
-                                                               labels=None)
+def initialize_prediction_loader(adata, tcr_chain, use_vdj, use_citeseq, metadata, batch_size, conditional=None):
+    prediction_dataset, _, _ = create_datasets(adata, 
+                                               obs_set_key=None, 
+                                               tcr_chain=tcr_chain,
+                                               use_vdj=use_vdj, 
+                                               use_citeseq=use_citeseq, 
+                                               metadata=metadata, 
+                                               conditional=conditional,
+                                               labels=None)
     
     prediction_loader = DataLoader(prediction_dataset, batch_size=batch_size, shuffle=False)
     return prediction_loader

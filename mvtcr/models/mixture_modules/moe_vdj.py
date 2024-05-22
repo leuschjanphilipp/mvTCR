@@ -122,11 +122,11 @@ class MoEModelTorch(nn.Module):
             if beta:
                 beta_pred = self.beta_decoder(f_tcr, beta_seq)
             else:
-                beta_seq = placeholder
+                beta_seq = torch.IntTensor()
             if alpha:
                 alpha_pred = self.alpha_decoder(f_tcr, alpha_seq)
             else:
-                alpha_pred =  placeholder
+                alpha_pred =  torch.IntTensor()
             tcr_pred.append(torch.cat([alpha_pred, beta_pred], dim=1))
 
 
