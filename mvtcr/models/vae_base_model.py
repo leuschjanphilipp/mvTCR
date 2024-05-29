@@ -92,6 +92,7 @@ class VAEBaseModel(ABC):
 		self.loss_function_rna = nn.MSELoss()
 		self.loss_function_kld = KLD()
 		self.loss_function_class = nn.CrossEntropyLoss()
+		#TODO CE loss after softmax on emb
 		if self.use_vdj:
 			self.loss_function_vdj = nn.MSELoss()
 		#TODO else None?

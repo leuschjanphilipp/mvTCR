@@ -49,6 +49,7 @@ def create_datasets(adata, obs_set_key, tcr_chain, use_vdj, use_citeseq,
     rna_val = adata.X[~train_mask]
 
     if use_vdj:
+        '''
         vdj_data = ir.get.airr(adata, ["v_call", "d_call", "j_call"]).copy()
         #vdj_data = pd.get_dummies(vdj_data, columns=["VJ_1_v_call", "VJ_1_j_call", "VDJ_1_v_call", "VDJ_1_d_call", "VDJ_1_j_call"], dtype=int).to_numpy()
         for col in vdj_data.columns:
@@ -56,7 +57,9 @@ def create_datasets(adata, obs_set_key, tcr_chain, use_vdj, use_citeseq,
             mapping = {val: idx for idx, val in enumerate(unique_values)}
             vdj_data[col] = vdj_data[col].map(mapping)
         vdj_data = vdj_data.to_numpy() #np array 5 genes x cells
-        
+        '''
+        #TODO keys for vdj calls or standartize according to scirpy? handle in prepro?
+        vdj_data = adata.obs[["VJ_1_v_call", "VJ_1_j_call", "VDJ_1_v_call", "VDJ_1_d_call", "VDJ_1_j_call"]].to_numpy()
         vdj_train = vdj_data[train_mask]
         vdj_val = vdj_data[~train_mask]
     else:

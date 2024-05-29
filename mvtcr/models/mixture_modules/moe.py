@@ -14,22 +14,27 @@ class MoEModelTorch(nn.Module):
     def __init__(self, tcr_params, rna_params, vdj_params, citeseq_params, joint_params):
         super(MoEModelTorch, self).__init__()
         
-        self.tcr_chain = tcr_params['tcr_chain']
+        self.both_tcr_chains = True if tcr_params['tcr_chain'] == "both" else False
         self.use_vdj = True if vdj_params is not None else False
         self.use_citeseq = True if citeseq_params is not None else False
         
-        self.amount_chains = 1 if self.tcr_chain != "both" else 2
+        #self.amount_chains = 1 if self.tcr_chain != "both" else 2
 
         num_seq_labels = tcr_params['num_seq_labels']
 
         xdim = rna_params['xdim']
 
-        emb_dim = vdj_params["vdj_embedding_dim"]
-        num_v_alpha_labels = vdj_params["num_v_alpha_labels"]
-        num_j_alpha_labels = vdj_params["num_j_alpha_labels"]
-        num_v_beta_labels = vdj_params["num_v_beta_labels"]
-        num_d_beta_labels = vdj_params["num_d_beta_labels"]
-        num_j_beta_labels = vdj_params["num_j_beta_labels"]
+        if self.use_vdj:
+            #TODO could do down to avoid double if, but cleaner here for now so params and modules separated
+            emb_dim = vdj_params["vdj_embedding_dim"]
+            num_v_alpha_labels = vdj_params["num_v_alpha_labels"]
+            num_j_alpha_labels = vdj_params["num_j_alpha_labels"]
+            num_v_beta_labels = vdj_params["num_v_beta_labels"]
+            num_d_beta_labels = vdj_params["num_d_beta_labels"]
+            num_j_beta_labels = vdj_params["num_j_beta_labels"]
+        
+        if self.use_citeseq:
+            pass
 
         hdim = joint_params['hdim']
         num_conditional_labels = joint_params['num_conditional_labels']
@@ -40,19 +45,21 @@ class MoEModelTorch(nn.Module):
         activation = joint_params['activation']
         dropout = joint_params['dropout']
         batch_norm = joint_params['batch_norm']
-        use_embedding_for_cond = joint_params[
-            'use_embedding_for_cond'] if 'use_embedding_for_cond' in joint_params else True
+        use_embedding_for_cond = joint_params['use_embedding_for_cond'] if 'use_embedding_for_cond' in joint_params else True
 
         # used for NB loss
         self.theta = torch.nn.Parameter(torch.randn(xdim))
 
         #if both chains; second transformer
-        if self.amount_chains == 2:
-            self.alpha_encoder = TransformerEncoder(tcr_params, hdim // self.amount_chains, num_seq_labels)
+        if self.both_tcr_chains:
+            self.alpha_encoder = TransformerEncoder(tcr_params, hdim // 2, num_seq_labels)
             self.alpha_decoder = TransformerDecoder(tcr_params, hdim, num_seq_labels)
 
-        self.beta_encoder = TransformerEncoder(tcr_params, hdim // self.amount_chains, num_seq_labels)
-        self.beta_decoder = TransformerDecoder(tcr_params, hdim, num_seq_labels)
+            self.beta_encoder = TransformerEncoder(tcr_params, hdim // 2, num_seq_labels)
+            self.beta_decoder = TransformerDecoder(tcr_params, hdim, num_seq_labels)
+        else:
+            self.beta_encoder = TransformerEncoder(tcr_params, hdim, num_seq_labels)
+            self.beta_decoder = TransformerDecoder(tcr_params, hdim, num_seq_labels)
 
         self.rna_encoder = build_mlp_encoder(rna_params, xdim, hdim)
         self.rna_decoder = build_mlp_decoder(rna_params, xdim, hdim)
@@ -108,13 +115,14 @@ class MoEModelTorch(nn.Module):
                                        dropout,
                                        batch_norm, 
                                        regularize_last_layer=True)
+            #TODO softmax
 
         # CiteSeq modality
         if self.use_citeseq:
             pass
 
 
-    def forward(self, rna, tcr, tcr_len, vdj, citeseq, conditional=None):
+    def forward(self, tcr, tcr_len, rna, vdj, citeseq, conditional=None):
         """
 		Forward pass of autoencoder
 		:param rna: torch.Tensor shape=[batch_size, num_genes]
@@ -129,7 +137,7 @@ class MoEModelTorch(nn.Module):
 			tcr_pred: list of reconstructed tcr. tcr_pred = [tcr_pred using z_tcr, tcr_pred using z_joint]
 		"""
         # Encode TCR
-        if self.amount_chains != 1:
+        if self.both_tcr_chains:
             #TODO check if tcr = cat(a, b) or cat(b, a)
             alpha_seq =  tcr[:, tcr.shape[1] // 2:]
             alpha_len = tcr_len[:, 0]
@@ -155,34 +163,33 @@ class MoEModelTorch(nn.Module):
             h_rna = torch.cat([h_rna, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
 
         # Predict Latent space
-        z_rna_ = self.rna_vae_encoder(h_rna)  # shape=[batch_size, zdim*2]
-        mu_rna, logvar_rna = z_rna_[:, :z_rna_.shape[1] // 2], z_rna_[:, z_rna_.shape[1] // 2:]
-        z_rna = self.reparameterize(mu_rna, logvar_rna)  # shape=[batch_size, zdim]
-
         z_tcr_ = self.tcr_vae_encoder(h_tcr)  # shape=[batch_size, zdim*2]
         mu_tcr, logvar_tcr = z_tcr_[:, :z_tcr_.shape[1] // 2], z_tcr_[:, z_tcr_.shape[1] // 2:]
         z_tcr = self.reparameterize(mu_tcr, logvar_tcr)  # shape=[batch_size, zdim]
 
+        z_rna_ = self.rna_vae_encoder(h_rna)  # shape=[batch_size, zdim*2]
+        mu_rna, logvar_rna = z_rna_[:, :z_rna_.shape[1] // 2], z_rna_[:, z_rna_.shape[1] // 2:]
+        z_rna = self.reparameterize(mu_rna, logvar_rna)  # shape=[batch_size, zdim]
+
         z = {"rna": z_rna, "tcr": z_tcr}
         mu = {"rna": mu_rna, "tcr": mu_tcr}
-        #TODO logvar != diag of Cov? which to use
         logvar = {"rna": z_rna, "tcr": z_tcr}
 
         if self.use_vdj:
             # Encode VDJ
-            h_v_alpha = self.embedding_v_alpha(vdj["v_alpha"])
-            h_j_alpha = self.embedding_j_alpha(vdj["j_alpha"])
-            h_v_beta = self.embedding_v_beta(vdj["v_beta"])
-            h_d_beta = self.embedding_d_beta(vdj["d_beta"])
-            h_j_beta = self.embedding_j_beta(vdj["j_beta"])
-            h_vdj = self.vdj_encoder(torch.cat(h_v_alpha, h_j_alpha, h_v_beta, h_d_beta, h_j_beta))
+            h_v_alpha = self.embedding_v_alpha(vdj[:,0])
+            h_j_alpha = self.embedding_j_alpha(vdj[:,1])
+            h_v_beta = self.embedding_v_beta(vdj[:,2])
+            h_d_beta = self.embedding_d_beta(vdj[:,3])
+            h_j_beta = self.embedding_j_beta(vdj[:,4])
+            h_vdj = self.vdj_encoder(torch.cat((h_v_alpha, h_j_alpha, h_v_beta, h_d_beta, h_j_beta), dim=-1))
             # Conditional
             if conditional is not None and self.cond_input:
                 h_vdj = torch.cat([h_vdj, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
             # Predict Latent space
             z_vdj_ = self.vdj_vae_encoder(h_vdj) # shape=[batch_size, zdim*2]
             mu_vdj, logvar_vdj = z_vdj_[:, :z_vdj_.shape[1] // 2], z_vdj_[:, z_vdj_.shape[1] // 2:]
-            z_vdj = self.reparametrize(mu_vdj, logvar_vdj)
+            z_vdj = self.reparameterize(mu_vdj, logvar_vdj)
             z["vdj"] = z_vdj
             mu["vdj"] = mu_vdj
             logvar["vdj"] = logvar_vdj
@@ -194,7 +201,6 @@ class MoEModelTorch(nn.Module):
             # Conditional
             # Predict latent space
 
-
         #Reconstruction
         predictions = dict()
         for z_ in z.values():
@@ -204,7 +210,7 @@ class MoEModelTorch(nn.Module):
 
             # TCR
             f_tcr = self.tcr_vae_decoder(z_)
-            if self.amount_chains != 1:
+            if self.both_tcr_chains:
                 beta_pred = self.beta_decoder(f_tcr, beta_seq)
                 alpha_pred = self.alpha_decoder(f_tcr, alpha_seq)
                 tcr_pred = torch.cat([alpha_pred, beta_pred], dim=1)
@@ -228,17 +234,17 @@ class MoEModelTorch(nn.Module):
         return z, mu, logvar, predictions
 
 
-    def reparameterize(self, mu, log_var):
+    def reparameterize(self, mu, logvar):
         """
 		https://debuggercafe.com/getting-started-with-variational-autoencoder-using-pytorch/
 		:param mu: mean from the encoder's latent space
 		:param log_var: log variance from the encoder's latent space
 		"""
-        mu = torch.stack(list(mu.values()))
-        log_var = torch.stack(list(log_var.values()))
-        std = torch.exp(0.5 * log_var)  # standard deviation
+        #mu = torch.stack(list(mu.values()))
+        #logvar = torch.stack(list(logvar.values()))
+        std = torch.exp(0.5 * logvar)  # standard deviation
         eps = torch.randn_like(std)  # `randn_like` as we need the same size
-        z = mu + (eps * std)  # sampling as if coming from the input space
+        z = mu + (std * eps)  # sampling as if coming from the input space
         return z
     
     def get_latent_from_z(self, z):
@@ -303,13 +309,17 @@ class MoEModel(VAEBaseModel):
         self.params_joint['cond_dim'] = cond_dim
         self.params_joint['cond_input'] = self.conditional is not None
 
-        self.params_vdj["num_v_alpha_labels"] = adata.obs["VJ_1_v_call"].max() + 1 #number of labels in categorical col
-        self.params_vdj["num_j_alpha_labels"] = adata.obs["VJ_1_j_call"].max() + 1
-        self.params_vdj["num_v_beta_labels"] = adata.obs["VDJ_1_v_call"].max() + 1
-        self.params_vdj["num_d_beta_labels"] = adata.obs["VDJ_1_d_call"].max() + 1
-        self.params_vdj["num_j_beta_labels"] = adata.obs["VDJ_1_j_call"].max() + 1
+        if self.use_vdj: 
+            #number of labels in categorical col
+            self.params_vdj["num_v_alpha_labels"] = adata.obs["VJ_1_v_call"].max() + 1
+            self.params_vdj["num_j_alpha_labels"] = adata.obs["VJ_1_j_call"].max() + 1
+            self.params_vdj["num_v_beta_labels"] = adata.obs["VDJ_1_v_call"].max() + 1
+            self.params_vdj["num_d_beta_labels"] = adata.obs["VDJ_1_d_call"].max() + 1
+            self.params_vdj["num_j_beta_labels"] = adata.obs["VDJ_1_j_call"].max() + 1
         
-        #TODO self.params_citeseq["placeholder"] = None
+        if self.use_citeseq:
+            #TODO
+            pass
 
         self.model = MoEModelTorch(self.params_tcr, self.params_rna, self.params_vdj, self.params_citeseq, self.params_joint)
 
@@ -334,6 +344,8 @@ class MoEModel(VAEBaseModel):
         return rna_loss, tcr_loss
 
     def calculate_kld_loss(self, mu, logvar, epoch):
+
+        
         kld_loss = (self.loss_function_kld(mu[0], logvar[0]) + self.loss_function_kld(mu[1], logvar[1]))
         kld_loss *= 0.5 * self.loss_weights[2] * self.get_kl_annealing_factor(epoch)
         z = 0.5 * (mu[0] + mu[1])
