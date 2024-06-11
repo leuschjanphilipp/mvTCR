@@ -95,8 +95,9 @@ class MoEModelTorch(nn.Module):
             self.embedding_d_beta = nn.Embedding(num_embeddings=num_d_beta_labels, embedding_dim=emb_dim)
             self.embedding_j_beta = nn.Embedding(num_embeddings=num_j_beta_labels, embedding_dim=emb_dim)
 
-            self.vdj_encoder = build_mlp_encoder(vdj_params, emb_dim*5, hdim)
-            self.vdj_decoder = build_mlp_decoder(vdj_params, emb_dim*5, hdim)
+            self.vdj_encoder = build_mlp_encoder(vdj_params, xdim=emb_dim*5, hdim=hdim)
+            out_dim = num_v_alpha_labels + num_j_alpha_labels + num_v_beta_labels + num_d_beta_labels + num_j_beta_labels
+            self.vdj_decoder = build_mlp_decoder(vdj_params, xdim=out_dim, hdim=hdim)
             
             self.vdj_vae_encoder = MLP(hdim + cond_input_dim, 
                                        zdim * 2, 
@@ -202,8 +203,10 @@ class MoEModelTorch(nn.Module):
             # Predict latent space
 
         #Reconstruction
-        predictions = dict()
-        for z_ in z.values():
+        predictions = {key: {} for key in z.keys()}
+
+
+        for modality, z_ in zip(z.keys(), z.values()):
             # Conditional
             if conditional is not None:
                 z_ = torch.cat([z_, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
@@ -216,20 +219,20 @@ class MoEModelTorch(nn.Module):
                 tcr_pred = torch.cat([alpha_pred, beta_pred], dim=1)
             else:
                 tcr_pred = self.beta_decoder(f_tcr, beta_seq)
-            predictions["tcr"] = tcr_pred
+            predictions["tcr"][modality] = tcr_pred
 
     	    # RNA
             f_rna = self.rna_vae_decoder(z_)
-            predictions["rna"] = self.rna_decoder(f_rna)
+            predictions["rna"][modality] = self.rna_decoder(f_rna)
 
             # VDJ
             if self.use_vdj:
                 f_vdj = self.vdj_vae_decoder(z_)
-                predictions["vdj"] = self.vdj_decoder(f_vdj)
+                predictions["vdj"][modality] = self.vdj_decoder(f_vdj)
 
             # CiteSeq
             if self.use_citeseq:
-                predictions["citeseq"] = None
+                predictions["citeseq"][modality] = None  #TODO
 
         return z, mu, logvar, predictions
 
@@ -251,6 +254,7 @@ class MoEModelTorch(nn.Module):
         # z.sum(axis=0) / n 
         return torch.stack(list(z.values())).sum(axis=0) / len(z)
 
+    # TODO: check if this is correct
     def predict_modality_from_shared_latent(self, z_shared, modality, conditional=None, tcr_seq=None):
         if conditional is not None:  # more efficient than doing two concatenations
             cond_emb_vec = self.cond_emb(conditional)
@@ -321,35 +325,66 @@ class MoEModel(VAEBaseModel):
             #TODO
             pass
 
-        self.model = MoEModelTorch(self.params_tcr, self.params_rna, self.params_vdj, self.params_citeseq, self.params_joint)
+        self.model = MoEModelTorch(self.params_tcr,
+                                   self.params_rna,
+                                   self.params_vdj,
+                                   self.params_citeseq,
+                                   self.params_joint)
 
-    def calculate_loss(self, rna_pred, rna, tcr_pred, tcr):
-        rna_loss = self.loss_function_rna(rna_pred[0], rna) + self.loss_function_rna(rna_pred[1], rna)
-        rna_loss *= 0.5 * self.loss_weights[0]
+    def calculate_loss(self,
+                       tcr_pred, tcr, 
+                       rna_pred, rna, 
+                       vdj_pred=None, vdj=None,
+                       citeseq_pred=None, citeseq=None):
 
-        # For GRU and Transformer, as they don't predict start token for alpha and beta chain, so amount of chains used
-        if tcr_pred[0].shape[1] == tcr.shape[1] - self.model.amount_chains:
-            mask = torch.ones_like(tcr).bool()
-            mask[:, [0]] = False
-            if not self.beta_only:
-                mask[:, [mask.shape[1] // 2]] = False
-            tcr_loss = self.loss_function_tcr(tcr_pred[0].flatten(end_dim=1), tcr[mask].flatten())
-            if not 'beta_only' in self.params_tcr or self.params_tcr['beta_only']:
-                tcr_loss += self.loss_function_tcr(tcr_pred[1].flatten(end_dim=1), tcr[mask].flatten())
-            tcr_loss *= 0.5 * self.loss_weights[1]
-        else:  # For CNN, as it predicts start token
-            tcr_loss = (self.loss_function_tcr(tcr_pred[0].flatten(end_dim=1), tcr.flatten()) +
-                        self.loss_function_tcr(tcr_pred[1].flatten(end_dim=1), tcr.flatten()))
-            tcr_loss *= 0.5 * self.loss_weights[1]
-        return rna_loss, tcr_loss
+        # TCR loss
+        # TODO implement check for transformer, GRU and CNN
+        #if tcr_pred[0].shape[1] == tcr.shape[1] - self.model.amount_chains:
+        mask = torch.ones_like(tcr).bool()
+        mask[:, [0]] = False
+        mask[:, [mask.shape[1] // 2]] = False
+        tcr_loss = [self.loss_function_tcr(pred_modality.flatten(end_dim=1), tcr[mask].flatten()) for pred_modality in tcr_pred.values()]
+        tcr_loss = torch.stack(tcr_loss).mean()
+        tcr_loss *= self.loss_weights["tcr"]
+
+        # RNA loss
+        rna_loss = [self.loss_function_rna(pred_modality, rna) for pred_modality in rna_pred.values()]
+        rna_loss = torch.stack(rna_loss).mean()
+        rna_loss *= self.loss_weights["rna"]
+
+        # VDJ loss
+        if self.use_vdj:
+            vdj_loss = []
+            for pred_modality in vdj_pred.values():
+                va_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_v_alpha_labels"]], vdj[:, 0])
+                ja_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_j_alpha_labels"]], vdj[:, 1])
+                vb_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_v_beta_labels"]], vdj[:, 2])
+                db_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_d_beta_labels"]], vdj[:, 3])
+                jb_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_j_beta_labels"]], vdj[:, 4])
+                vdj_loss.append((va_loss + ja_loss + vb_loss + db_loss + jb_loss) / 5)
+
+            vdj_loss = torch.stack(vdj_loss).mean()
+            vdj_loss *= self.loss_weights["vdj"]
+        else:
+            vdj_loss = None
+
+        # CiteSeq loss
+        # TODO
+        if self.use_citeseq:
+            citeseq_loss = None
+        else:
+            citeseq_loss = None
+
+        return {"rna": rna_loss, "tcr": tcr_loss, "vdj": vdj_loss, "citeseq": citeseq_loss}
 
     def calculate_kld_loss(self, mu, logvar, epoch):
 
-        
-        kld_loss = (self.loss_function_kld(mu[0], logvar[0]) + self.loss_function_kld(mu[1], logvar[1]))
-        kld_loss *= 0.5 * self.loss_weights[2] * self.get_kl_annealing_factor(epoch)
-        z = 0.5 * (mu[0] + mu[1])
-        return kld_loss, z
+        kld_loss = [self.loss_function_kld(mu_modality, logvar_modality) for mu_modality, logvar_modality in zip(mu.values(), logvar.values())]  
+        kld_loss = sum(kld_loss) / len(kld_loss)
+        kld_loss *= self.loss_weights["kld"] 
+        kld_loss *= self.get_kl_annealing_factor(epoch)
+        #z = 0.5 * (mu[0] + mu[1])
+        return kld_loss
 
     def get_latent_unimodal(self, adata, metadata, modality, return_mean=True):
         """

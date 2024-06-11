@@ -92,10 +92,8 @@ class VAEBaseModel(ABC):
 		self.loss_function_rna = nn.MSELoss()
 		self.loss_function_kld = KLD()
 		self.loss_function_class = nn.CrossEntropyLoss()
-		#TODO CE loss after softmax on emb
 		if self.use_vdj:
-			self.loss_function_vdj = nn.MSELoss()
-		#TODO else None?
+			self.loss_function_vdj = nn.CrossEntropyLoss()
 		if self.use_citeseq:
 			self.loss_function_citeseq = nn.MSELoss()
 
@@ -251,6 +249,8 @@ class VAEBaseModel(ABC):
 				conditional = None
 
 			z, mu, logvar, rna_pred, tcr_pred = self.model(rna, tcr, seq_len, conditional)
+			# TODO z overwrite but not used afterwards but in supervised model 
+			# TODO --> maybe thats the why supervised model is not working well
 			kld_loss, z = self.calculate_kld_loss(mu, logvar, epoch)
 			rna_loss, tcr_loss = self.calculate_loss(rna_pred, rna, tcr_pred, tcr)
 			loss = kld_loss + rna_loss + tcr_loss
