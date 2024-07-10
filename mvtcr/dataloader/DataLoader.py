@@ -151,6 +151,7 @@ def calculate_sampling_weights(adata, train_mask, class_column):
 
 
 # <- data loader for prediction ->
+#TODO check labels and overall structure
 def initialize_prediction_loader(adata, tcr_chain, use_vdj, use_citeseq, metadata, batch_size, conditional=None):
     prediction_dataset, _, _ = create_datasets(adata, 
                                                obs_set_key=None, 

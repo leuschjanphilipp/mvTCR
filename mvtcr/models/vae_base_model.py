@@ -349,28 +349,43 @@ class VAEBaseModel(ABC):
 	# <- prediction functions ->
 	@check_if_input_is_mudata
 	def get_latent(self, adata, metadata, return_mean=True, copy_adata_obs=False):
+		#TODO write that adata ist first arg followed by kwargs because of mudata decorator
 		"""
 		Get latent
 		:param adata:
 		:param metadata: list of str, list of metadata that is needed, not really useful at the moment
 		:param return_mean: bool, calculate latent space without sampling
 		:return: adata containing embedding vector in adata.X for each cell and the specified metadata in adata.obs
-		"""
-		data_embed = initialize_prediction_loader(adata, metadata, self.batch_size, beta_only=self.beta_only,
-												  conditional=self.conditional)
+		"""		
+		data_embed = initialize_prediction_loader(adata, 
+												tcr_chain=self.tcr_chain,
+												use_vdj=self.use_vdj, 
+												use_citeseq=self.use_citeseq, 
+												metadata=metadata,
+												batch_size=self.batch_size, 
+												conditional=self.conditional)
 		zs = []
 		with torch.no_grad():
 			self.model = self.model.to(self.device)
 			self.model.eval()
-			for rna, tcr, seq_len, _, labels, conditional in data_embed:
-				rna = rna.to(self.device)
+
+			for batch in data_embed:
+				tcr, tcr_length, rna, vdj, citeseq, metadata, labels, conditional = batch.values()
+								
 				tcr = tcr.to(self.device)
+				tcr_length = tcr_length.to(self.device)
+				rna = rna.to(self.device)
+				vdj = vdj.to(self.device)
+				citeseq = citeseq.to(self.device)
+				conditional = conditional.to(self.device)
+				
+				z, mu, logvar, predictions = self.model.forward(tcr, tcr_length, rna, vdj, citeseq)
 
 				if self.conditional is not None:
 					conditional = conditional.to(self.device)
 				else:
 					conditional = None
-				z, mu, _, _, _ = self.model(rna, tcr, seq_len, conditional)
+
 				if return_mean:
 					z = mu
 				z = self.model.get_latent_from_z(z)

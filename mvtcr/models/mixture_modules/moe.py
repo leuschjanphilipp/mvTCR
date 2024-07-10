@@ -95,11 +95,12 @@ class MoEModelTorch(nn.Module):
             self.embedding_d_beta = nn.Embedding(num_embeddings=num_d_beta_labels, embedding_dim=emb_dim)
             self.embedding_j_beta = nn.Embedding(num_embeddings=num_j_beta_labels, embedding_dim=emb_dim)
 
-            self.vdj_encoder = build_mlp_encoder(vdj_params, xdim=emb_dim*5, hdim=hdim)
             out_dim = num_v_alpha_labels + num_j_alpha_labels + num_v_beta_labels + num_d_beta_labels + num_j_beta_labels
-            self.vdj_decoder = build_mlp_decoder(vdj_params, xdim=out_dim, hdim=hdim)
+
+            #self.vdj_encoder = build_mlp_encoder(vdj_params, xdim=emb_dim*5, hdim=hdim)      
+            #self.vdj_decoder = build_mlp_decoder(vdj_params, xdim=out_dim, hdim=hdim)
             
-            self.vdj_vae_encoder = MLP(hdim + cond_input_dim, 
+            self.vdj_vae_encoder = MLP(emb_dim*5 + cond_input_dim, 
                                        zdim * 2, 
                                        shared_hidden, 
                                        activation, 
@@ -108,15 +109,15 @@ class MoEModelTorch(nn.Module):
                                        batch_norm, 
                                        regularize_last_layer=False)
             
+            #dont regularize last layer because its the prediction layer; if used with vdj_decoder, apply regularization in last layer of vdj_vae_decoder and disable it vdj_decoder
             self.vdj_vae_decoder = MLP(zdim + cond_dim, 
-                                       hdim, 
+                                       out_dim, 
                                        shared_hidden[::-1], 
                                        activation, 
                                        activation, 
                                        dropout,
                                        batch_norm, 
-                                       regularize_last_layer=True)
-            #TODO softmax
+                                       regularize_last_layer=False)
 
         # CiteSeq modality
         if self.use_citeseq:
@@ -183,12 +184,16 @@ class MoEModelTorch(nn.Module):
             h_v_beta = self.embedding_v_beta(vdj[:,2])
             h_d_beta = self.embedding_d_beta(vdj[:,3])
             h_j_beta = self.embedding_j_beta(vdj[:,4])
-            h_vdj = self.vdj_encoder(torch.cat((h_v_alpha, h_j_alpha, h_v_beta, h_d_beta, h_j_beta), dim=-1))
+            vdj_embedded = torch.cat([h_v_alpha, h_j_alpha, h_v_beta, h_d_beta, h_j_beta], dim=-1) # shape=[batch_size, emb_dim*5]
+            #h_vdj = self.vdj_encoder(torch.cat((h_v_alpha, h_j_alpha, h_v_beta, h_d_beta, h_j_beta), dim=-1))
+            
             # Conditional
             if conditional is not None and self.cond_input:
-                h_vdj = torch.cat([h_vdj, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
+                #h_vdj = torch.cat([h_vdj, cond_emb_vec], dim=1)  # shape=[batch_size, hdim+n_cond]
+                vdj_embedded = torch.cat([vdj_embedded, cond_emb_vec], dim=1)  # shape=[batch_size, emb_dim*5+n_cond]
+            
             # Predict Latent space
-            z_vdj_ = self.vdj_vae_encoder(h_vdj) # shape=[batch_size, zdim*2]
+            z_vdj_ = self.vdj_vae_encoder(vdj_embedded) # shape=[batch_size, zdim*2]
             mu_vdj, logvar_vdj = z_vdj_[:, :z_vdj_.shape[1] // 2], z_vdj_[:, z_vdj_.shape[1] // 2:]
             z_vdj = self.reparameterize(mu_vdj, logvar_vdj)
             z["vdj"] = z_vdj
@@ -228,7 +233,7 @@ class MoEModelTorch(nn.Module):
             # VDJ
             if self.use_vdj:
                 f_vdj = self.vdj_vae_decoder(z_)
-                predictions["vdj"][modality] = self.vdj_decoder(f_vdj)
+                predictions["vdj"][modality] = f_vdj #self.vdj_decoder(f_vdj)
 
             # CiteSeq
             if self.use_citeseq:
@@ -252,6 +257,7 @@ class MoEModelTorch(nn.Module):
     
     def get_latent_from_z(self, z):
         # z.sum(axis=0) / n 
+        # 1/n * sum(z)
         return torch.stack(list(z.values())).sum(axis=0) / len(z)
 
     # TODO: check if this is correct
@@ -314,6 +320,7 @@ class MoEModel(VAEBaseModel):
         self.params_joint['cond_input'] = self.conditional is not None
 
         if self.use_vdj: 
+            #TODO max num of genes for each gene type for better imputation
             #number of labels in categorical col
             self.params_vdj["num_v_alpha_labels"] = adata.obs["VJ_1_v_call"].max() + 1
             self.params_vdj["num_j_alpha_labels"] = adata.obs["VJ_1_j_call"].max() + 1
@@ -354,16 +361,26 @@ class MoEModel(VAEBaseModel):
 
         # VDJ loss
         if self.use_vdj:
+            va_idx = self.params_vdj["num_v_alpha_labels"]
+            ja_idx = self.params_vdj["num_j_alpha_labels"]
+            vb_idx = self.params_vdj["num_v_beta_labels"]
+            db_idx = self.params_vdj["num_d_beta_labels"]
+            jb_idx = self.params_vdj["num_j_beta_labels"]
+
             vdj_loss = []
             for pred_modality in vdj_pred.values():
-                va_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_v_alpha_labels"]], vdj[:, 0])
-                ja_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_j_alpha_labels"]], vdj[:, 1])
-                vb_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_v_beta_labels"]], vdj[:, 2])
-                db_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_d_beta_labels"]], vdj[:, 3])
-                jb_loss = self.loss_function_vdj(pred_modality[:, :self.params_vdj["num_j_beta_labels"]], vdj[:, 4])
+                #TODO clarify language of comment
+                #vdj vae_decorder output shape is [batch_size, num_v_alpha_labels + num_j_alpha_labels + num_v_beta_labels + num_d_beta_labels + num_j_beta_labels]
+                #each slice of the output used for loss calculation for different genes
+                va_loss = self.loss_function_vdj(pred_modality[:, :va_idx], vdj[:, 0])
+                ja_loss = self.loss_function_vdj(pred_modality[:, va_idx : va_idx+ja_idx], vdj[:, 1])
+                vb_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx : va_idx+ja_idx+vb_idx], vdj[:, 2])
+                db_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx+vb_idx : va_idx+ja_idx+vb_idx+db_idx], vdj[:, 3])
+                jb_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx+vb_idx+db_idx :], vdj[:, 4])
                 vdj_loss.append((va_loss + ja_loss + vb_loss + db_loss + jb_loss) / 5)
 
             vdj_loss = torch.stack(vdj_loss).mean()
+            #beta scaling of loss
             vdj_loss *= self.loss_weights["vdj"]
         else:
             vdj_loss = None

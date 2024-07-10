@@ -2,10 +2,6 @@ import torch
 import numpy as np
 from scipy import sparse
 
-
-import torch
-from scipy import sparse
-
 class JointDataset(torch.utils.data.Dataset):
     def __init__(self, tcr_data, tcr_length, rna_data, vdj_data=None, citeseq_data=None, obs_metadata=None, labels=None, conditional=None):
         """
