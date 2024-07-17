@@ -3,13 +3,13 @@ from mvtcr.evaluation.WrapperFunctions import get_model_prediction_function
 from mvtcr.evaluation.kNN import run_knn_within_set_evaluation
 
 
-def report_pseudo_metric(adata, model, optimization_mode_params, epoch, comet):
+def report_pseudo_metric(adata, model, label_pred, epoch, comet):
     """
     Calculate a pseudo metric based on kNN of multiple meta information
     :param epoch:
     :return:
     """
-    prediction_label = optimization_mode_params['prediction_labels']
+    prediction_label = label_pred
 
     labels = prediction_label.copy()
     if isinstance(prediction_label, dict):

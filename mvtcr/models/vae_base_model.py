@@ -43,9 +43,11 @@ class VAEBaseModel(ABC):
 		self.balanced_sampling = params_experiment["balanced_sampling"]
 		self.metadata = params_experiment["metadata"]
 		self.conditional = params_experiment["conditional"]
+
 		self.optimization_method = params_experiment["optimization_method"]
 		self.prediction_key = params_experiment["prediction_key"]
 		#self.optimization_mode_params = optimization_mode_params
+
 		self.label_key = params_experiment["label_key"]
 		self.device = params_experiment["device"]
 		self.set_key = params_experiment["set_key"]
@@ -185,7 +187,7 @@ class VAEBaseModel(ABC):
 		self.loss_weights = loss_weights
 		self.comet = comet
 		self.kl_annealing_epochs = kl_annealing_epochs
-		assert 3 <= len(loss_weights) <= 4, 'Length of loss weights need to be either 3 or 4.'
+		#TODO assert 3 <= len(loss_weights) <= 4, 'Length of loss weights need to be either 3 or 4.'
 
 		try:
 			os.makedirs(save_path)  # Create directory to prevent Error while saving model weights
@@ -229,33 +231,41 @@ class VAEBaseModel(ABC):
 		else:
 			data = self.data_val
 		loss_total = []
-		rna_loss_total = []
 		tcr_loss_total = []
+		rna_loss_total = []
+		vdj_loss_total = []
+		citeseq_loss_total = []
 		kld_loss_total = []
 		cls_loss_total = []
 		ys = []
 		y_preds = []
 
-		for rna, tcr, seq_len, _, labels, conditional in data:
+		for batch in data:
+
+			tcr, tcr_length, rna, vdj, citeseq, _, labels, conditional = batch.values()
+
 			if rna.shape[0] == 1 and phase == 'train':
 				continue  # BatchNorm cannot handle batches of size 1 during training phase
-			rna = rna.to(self.device)
+
 			tcr = tcr.to(self.device)
+			tcr_length = tcr_length.to(self.device)
+			rna = rna.to(self.device)
+			vdj = vdj.to(self.device)
+			citeseq = citeseq.to(self.device)
 			labels = labels.to(self.device)
+			conditional = conditional.to(self.device)
 
-			if self.conditional is not None:
-				conditional = conditional.to(self.device)
-			else:
-				conditional = None
+			z, mu, logvar, predictions = self.model.forward(tcr, tcr_length, rna, vdj, citeseq)
+		
+			kld_loss = self.calculate_kld_loss(mu, logvar, epoch)
 
-			z, mu, logvar, rna_pred, tcr_pred = self.model(rna, tcr, seq_len, conditional)
-			# TODO z overwrite but not used afterwards but in supervised model 
-			# TODO --> maybe thats the why supervised model is not working well
-			kld_loss, z = self.calculate_kld_loss(mu, logvar, epoch)
-			rna_loss, tcr_loss = self.calculate_loss(rna_pred, rna, tcr_pred, tcr)
-			loss = kld_loss + rna_loss + tcr_loss
-			#if_supervised
+			true = {"tcr": tcr, "rna": rna, "vdj": vdj, "citeseq": citeseq}
+			loss_modalities = self.calculate_loss(predictions, true)
+			
+			loss = sum(loss_modalities.values()) + kld_loss
+
 			if self.supervised_model is not None:
+				#TODO
 				y_pred = self.supervised_model(z)
 				cls_loss = self.loss_function_class(y_pred, labels)
 				loss += self.params_supervised['loss_weights_sv'] * cls_loss
@@ -267,8 +277,12 @@ class VAEBaseModel(ABC):
 				self.run_backward_pass(loss)
 
 			loss_total.append(loss)
-			rna_loss_total.append(rna_loss)
-			tcr_loss_total.append(tcr_loss)
+			rna_loss_total.append(loss_modalities["rna"])
+			tcr_loss_total.append(loss_modalities["tcr"])
+			if self.use_vdj:
+				vdj_loss_total.append(loss_modalities["vdj"])
+			if self.use_citeseq:
+				citeseq_loss_total.append(loss_modalities["citeseq"])
 			kld_loss_total.append(kld_loss)
 
 			if torch.isnan(loss):
@@ -279,13 +293,23 @@ class VAEBaseModel(ABC):
 		rna_loss_total = torch.stack(rna_loss_total).mean().item()
 		tcr_loss_total = torch.stack(tcr_loss_total).mean().item()
 		kld_loss_total = torch.stack(kld_loss_total).mean().item()
+		if self.use_vdj:
+			vdj_loss_total = torch.stack(vdj_loss_total).mean().item()
+		if self.use_citeseq:
+			citeseq_loss_total = torch.stack(citeseq_loss_total).mean().item()
 
 		summary_losses = {f'{phase} Loss': loss_total,
-						  f'{phase} RNA Loss': rna_loss_total,
 						  f'{phase} TCR Loss': tcr_loss_total,
+						  f'{phase} RNA Loss': rna_loss_total,
 						  f'{phase} KLD Loss': kld_loss_total}
+		if self.use_vdj:
+			summary_losses[f'{phase} VDJ Loss'] = vdj_loss_total
+		if self.use_citeseq:
+			summary_losses[f'{phase} CiteSeq Loss'] = citeseq_loss_total
+
 		#if_supervised
 		if self.supervised_model is not None:
+			#TODO
 			cls_loss_total = torch.stack(cls_loss_total).mean().item()
 			summary_losses[f'{phase} CLS Loss'] = cls_loss_total
 			ys = torch.cat(ys, dim=0)
@@ -303,34 +327,38 @@ class VAEBaseModel(ABC):
 	def run_backward_pass(self, loss):
 		self.optimizer.zero_grad()
 		loss.backward()
-		if self.optimization_mode_params is not None and 'grad_clip' in self.optimization_mode_params:
-			nn.utils.clip_grad_value_(self.model.parameters(), self.optimization_mode_params['grad_clip'])
+		#TODO
+		#if self.optimization_mode_params is not None and 'grad_clip' in self.optimization_mode_params:
+		#	nn.utils.clip_grad_value_(self.model.parameters(), self.optimization_mode_params['grad_clip'])
 		self.optimizer.step()
 
 	def additional_evaluation(self, epoch, save_path):
-		if self.optimization_mode_params is None:
+		if self.optimization_method is None:
 			return
-		name = self.optimization_mode_params['name']
+		
+		name = self.optimization_method
 		if name == 'reconstruction':
 			return
 		if name == 'knn_prediction':
-			score, relation = report_knn_prediction(self.adata, self, self.optimization_mode_params,
+			score, relation = report_knn_prediction(self.adata, self, self.prediction_key,
 													epoch, self.comet)
 		elif name == 'modulation_prediction':
-			score, relation = report_modulation_prediction(self.adata, self, self.optimization_mode_params,
+			#TODO check for ambiguity
+			score, relation = report_modulation_prediction(self.adata, self, self.optimization_mode_params, #here
 														   epoch, self.comet)
 		elif name == 'pseudo_metric':
-			score, relation = report_pseudo_metric(self.adata, self, self.optimization_mode_params,
+			score, relation = report_pseudo_metric(self.adata, self, self.prediction_key,
 												   epoch, self.comet)
 		elif name == 'supervised':
+			#TODO
 			score, relation = self.summary_losses['val CLS F1'], operator.gt
 		else:
 			raise ValueError('Unknown Optimization mode')
-		if self.best_optimization_metric is None or relation(score, self.best_optimization_metric):
-			self.best_optimization_metric = score
-			self.save(os.path.join(save_path, f'best_model_by_metric.pt'))
-		if self.comet is not None:
-			self.comet.log_metric('max_metric', self.best_optimization_metric, epoch=epoch)
+		#if self.best_optimization_metric is None or relation(score, self.best_optimization_metric):
+		#	self.best_optimization_metric = score
+		#	self.save(os.path.join(save_path, f'best_model_by_metric.pt'))
+		#if self.comet is not None:
+		#	self.comet.log_metric('max_metric', self.best_optimization_metric, epoch=epoch)
 
 	def do_early_stopping(self, val_loss, early_stop, save_path, epoch):
 		if self.best_loss is None or val_loss < self.best_loss:
@@ -566,7 +594,7 @@ class VAEBaseModel(ABC):
 					  'balanced_sampling': self.balanced_sampling,
 					  'metadata': self.metadata,
 					  'conditional': self.conditional,
-					  'optimization_mode_params': self.optimization_mode_params,
+					  'optimization_mode_params': self.optimization_mode_params, #TODO
 					  'label_key': self.label_key,
 					  'model_type': self.model_type,
 					  }

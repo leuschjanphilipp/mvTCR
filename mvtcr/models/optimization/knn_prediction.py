@@ -4,7 +4,7 @@ from mvtcr.evaluation.WrapperFunctions import get_model_prediction_function
 from mvtcr.evaluation.Imputation import run_imputation_evaluation
 
 
-def report_knn_prediction(adata, model, optimization_mode_params, epoch, comet):
+def report_knn_prediction(adata, model, label_pred, epoch, comet):
     """
     Report the objective metric of the 10x dataset for hyper parameter optimization.
     :param epoch: epoch number for logging
@@ -12,7 +12,7 @@ def report_knn_prediction(adata, model, optimization_mode_params, epoch, comet):
     """
     test_embedding_func = get_model_prediction_function(model)
     summary = run_imputation_evaluation(adata, test_embedding_func, query_source='val',
-                                        label_pred=optimization_mode_params['prediction_column'])
+                                        label_pred=label_pred)
     metrics = summary['knn']
 
     if comet is not None:

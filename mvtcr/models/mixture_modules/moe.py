@@ -338,26 +338,29 @@ class MoEModel(VAEBaseModel):
                                    self.params_citeseq,
                                    self.params_joint)
 
-    def calculate_loss(self,
-                       tcr_pred, tcr, 
-                       rna_pred, rna, 
-                       vdj_pred=None, vdj=None,
-                       citeseq_pred=None, citeseq=None):
-
+    def calculate_loss(self, predictions, true):
+        '''
+        Calculate loss for each modality
+        :param predictions: dict of dicts, dictionary containing predictions for each modality from each modality
+        :param true: dict, dictionary containing true values for each modality
+        '''
+        losses = dict()
         # TCR loss
         # TODO implement check for transformer, GRU and CNN
         #if tcr_pred[0].shape[1] == tcr.shape[1] - self.model.amount_chains:
-        mask = torch.ones_like(tcr).bool()
+        mask = torch.ones_like(true["tcr"]).bool()
         mask[:, [0]] = False
         mask[:, [mask.shape[1] // 2]] = False
-        tcr_loss = [self.loss_function_tcr(pred_modality.flatten(end_dim=1), tcr[mask].flatten()) for pred_modality in tcr_pred.values()]
+        tcr_loss = [self.loss_function_tcr(pred_modality.flatten(end_dim=1), true["tcr"][mask].flatten()) for pred_modality in predictions["tcr"].values()]
         tcr_loss = torch.stack(tcr_loss).mean()
         tcr_loss *= self.loss_weights["tcr"]
+        losses["tcr"] = tcr_loss
 
         # RNA loss
-        rna_loss = [self.loss_function_rna(pred_modality, rna) for pred_modality in rna_pred.values()]
+        rna_loss = [self.loss_function_rna(pred_modality, true["rna"]) for pred_modality in predictions["rna"].values()]
         rna_loss = torch.stack(rna_loss).mean()
         rna_loss *= self.loss_weights["rna"]
+        losses["rna"] = rna_loss
 
         # VDJ loss
         if self.use_vdj:
@@ -368,31 +371,28 @@ class MoEModel(VAEBaseModel):
             jb_idx = self.params_vdj["num_j_beta_labels"]
 
             vdj_loss = []
-            for pred_modality in vdj_pred.values():
+            for pred_modality in predictions["vdj"].values():
                 #TODO clarify language of comment
                 #vdj vae_decorder output shape is [batch_size, num_v_alpha_labels + num_j_alpha_labels + num_v_beta_labels + num_d_beta_labels + num_j_beta_labels]
                 #each slice of the output used for loss calculation for different genes
-                va_loss = self.loss_function_vdj(pred_modality[:, :va_idx], vdj[:, 0])
-                ja_loss = self.loss_function_vdj(pred_modality[:, va_idx : va_idx+ja_idx], vdj[:, 1])
-                vb_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx : va_idx+ja_idx+vb_idx], vdj[:, 2])
-                db_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx+vb_idx : va_idx+ja_idx+vb_idx+db_idx], vdj[:, 3])
-                jb_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx+vb_idx+db_idx :], vdj[:, 4])
+                va_loss = self.loss_function_vdj(pred_modality[:, :va_idx], true["vdj"][:, 0])
+                ja_loss = self.loss_function_vdj(pred_modality[:, va_idx : va_idx+ja_idx], true["vdj"][:, 1])
+                vb_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx : va_idx+ja_idx+vb_idx], true["vdj"][:, 2])
+                db_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx+vb_idx : va_idx+ja_idx+vb_idx+db_idx], true["vdj"][:, 3])
+                jb_loss = self.loss_function_vdj(pred_modality[:, va_idx+ja_idx+vb_idx+db_idx :], true["vdj"][:, 4])
                 vdj_loss.append((va_loss + ja_loss + vb_loss + db_loss + jb_loss) / 5)
 
             vdj_loss = torch.stack(vdj_loss).mean()
             #beta scaling of loss
             vdj_loss *= self.loss_weights["vdj"]
-        else:
-            vdj_loss = None
+            losses["vdj"] = vdj_loss
 
         # CiteSeq loss
         # TODO
         if self.use_citeseq:
-            citeseq_loss = None
-        else:
-            citeseq_loss = None
+            losses["citeseq"] = None
 
-        return {"rna": rna_loss, "tcr": tcr_loss, "vdj": vdj_loss, "citeseq": citeseq_loss}
+        return losses
 
     def calculate_kld_loss(self, mu, logvar, epoch):
 
