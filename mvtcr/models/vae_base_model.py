@@ -29,14 +29,15 @@ class VAEBaseModel(ABC):
 	def __init__(self,
 				 adata,
 				 params_experiment,
-				 params_architecture):
+				 params_architecture,
+				 params_optimization):
 		"""
 		VAE Base Model, used for both single and joint models
 		:param adata: list of adatas containing train and val set
 		:param conditional: str or None, if None a normal VAE is used, if str then the str determines the adata.obsm[conditional] as conditioning variable
 		:param metadata: list of str, list of metadata that is needed, not really useful at the moment
 		:param balanced_sampling: None or str, indicate adata.obs column to balance
-		:param optimization_mode_params: dict carrying the mode specific parameters
+		:param params_optimization: dict carrying the mode specific parameters for optimization
 		"""
 		self.adata = adata
 		self.params_architecture = params_architecture
@@ -44,9 +45,7 @@ class VAEBaseModel(ABC):
 		self.metadata = params_experiment["metadata"]
 		self.conditional = params_experiment["conditional"]
 
-		self.optimization_method = params_experiment["optimization_method"]
-		self.prediction_key = params_experiment["prediction_key"]
-		#self.optimization_mode_params = optimization_mode_params
+		self.params_optimization = params_optimization
 
 		self.label_key = params_experiment["label_key"]
 		self.device = params_experiment["device"]
@@ -74,7 +73,6 @@ class VAEBaseModel(ABC):
 		#TODO
 		if 'supervised' in params_architecture:
 			self.params_supervised = params_architecture['supervised']
-
 		
 		self.aa_to_id = adata.uns['aa_to_id']
 
@@ -261,6 +259,7 @@ class VAEBaseModel(ABC):
 
 			true = {"tcr": tcr, "rna": rna, "vdj": vdj, "citeseq": citeseq}
 			loss_modalities = self.calculate_loss(predictions, true)
+			print(loss_modalities, kld_loss)
 			
 			loss = sum(loss_modalities.values()) + kld_loss
 
@@ -328,37 +327,37 @@ class VAEBaseModel(ABC):
 		self.optimizer.zero_grad()
 		loss.backward()
 		#TODO
-		#if self.optimization_mode_params is not None and 'grad_clip' in self.optimization_mode_params:
-		#	nn.utils.clip_grad_value_(self.model.parameters(), self.optimization_mode_params['grad_clip'])
+		if self.params_optimization is not None and 'grad_clip' in self.params_optimization:
+			nn.utils.clip_grad_value_(self.model.parameters(), self.params_optimization['grad_clip'])
 		self.optimizer.step()
 
 	def additional_evaluation(self, epoch, save_path):
-		if self.optimization_method is None:
+		if self.params_optimization["name"] is None:
 			return
 		
-		name = self.optimization_method
+		name = self.params_optimization["name"]
 		if name == 'reconstruction':
 			return
 		if name == 'knn_prediction':
-			score, relation = report_knn_prediction(self.adata, self, self.prediction_key,
+			score, relation = report_knn_prediction(self.adata, self, self.params_optimization,
 													epoch, self.comet)
 		elif name == 'modulation_prediction':
 			#TODO check for ambiguity
-			score, relation = report_modulation_prediction(self.adata, self, self.optimization_mode_params, #here
+			score, relation = report_modulation_prediction(self.adata, self, self.params_optimization, #here
 														   epoch, self.comet)
 		elif name == 'pseudo_metric':
-			score, relation = report_pseudo_metric(self.adata, self, self.prediction_key,
+			score, relation = report_pseudo_metric(self.adata, self, self.params_optimization,
 												   epoch, self.comet)
 		elif name == 'supervised':
 			#TODO
 			score, relation = self.summary_losses['val CLS F1'], operator.gt
 		else:
 			raise ValueError('Unknown Optimization mode')
-		#if self.best_optimization_metric is None or relation(score, self.best_optimization_metric):
-		#	self.best_optimization_metric = score
-		#	self.save(os.path.join(save_path, f'best_model_by_metric.pt'))
-		#if self.comet is not None:
-		#	self.comet.log_metric('max_metric', self.best_optimization_metric, epoch=epoch)
+		if self.best_optimization_metric is None or relation(score, self.best_optimization_metric):
+			self.best_optimization_metric = score
+			self.save(os.path.join(save_path, f'best_model_by_metric.pt'))
+		if self.comet is not None:
+			self.comet.log_metric('max_metric', self.best_optimization_metric, epoch=epoch)
 
 	def do_early_stopping(self, val_loss, early_stop, save_path, epoch):
 		if self.best_loss is None or val_loss < self.best_loss:
@@ -376,6 +375,7 @@ class VAEBaseModel(ABC):
 
 	# <- prediction functions ->
 	@check_if_input_is_mudata
+	#TODO change return_mean to true actually
 	def get_latent(self, adata, metadata, return_mean=True, copy_adata_obs=False):
 		#TODO write that adata ist first arg followed by kwargs because of mudata decorator
 		"""
@@ -398,7 +398,8 @@ class VAEBaseModel(ABC):
 			self.model.eval()
 
 			for batch in data_embed:
-				tcr, tcr_length, rna, vdj, citeseq, metadata, labels, conditional = batch.values()
+				#TODO _ is metadata, why is this not empty?
+				tcr, tcr_length, rna, vdj, citeseq, _, labels, conditional = batch.values()
 								
 				tcr = tcr.to(self.device)
 				tcr_length = tcr_length.to(self.device)
@@ -422,7 +423,6 @@ class VAEBaseModel(ABC):
 				zs.append(z)
 		latent = sc.AnnData.concatenate(*zs)
 		latent.obs.index = adata.obs.index
-		
 		for key in metadata:
 			latent.obs[key] = adata.obs[key]
 		if copy_adata_obs:
@@ -594,7 +594,7 @@ class VAEBaseModel(ABC):
 					  'balanced_sampling': self.balanced_sampling,
 					  'metadata': self.metadata,
 					  'conditional': self.conditional,
-					  'optimization_mode_params': self.optimization_mode_params, #TODO
+					  'params_optimization': self.params_optimization, #TODO
 					  'label_key': self.label_key,
 					  'model_type': self.model_type,
 					  }

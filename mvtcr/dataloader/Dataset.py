@@ -9,7 +9,7 @@ class JointDataset(torch.utils.data.Dataset):
         :param tcr_data: list of seq_data, where each element is a seq_list of one dataset
         :param tcr_length: list of non-padded sequence length, needed for many architectures to mask the padding out
         :param vdj_data: list of vdj gene expression ohe encoded
-        :param citeseq_data: #TODO
+        :param citeseq_data: list of citeseq gene expressions, where each element is a numpy or sparse matrix of one dataset
         :param metadata: list of metadata
         :param labels: list of labels
         :param conditional: list of conditionales
@@ -18,7 +18,10 @@ class JointDataset(torch.utils.data.Dataset):
         self.tcr_data = torch.LongTensor(tcr_data)
         self.rna_data = self._create_tensor(rna_data)
         self.vdj_data = self._init_optional_tensor(vdj_data)
-        self.citeseq_data = self._init_optional_tensor(citeseq_data)
+
+        self.citeseq_data = self._create_tensor(citeseq_data) if citeseq_data is not None else None 
+        
+        #TODO: check if this is correct or other way around
         self.metadata = obs_metadata.tolist() if obs_metadata is not None else None
         self.labels = self._init_optional_tensor(labels, dtype=torch.LongTensor)
         self.conditional = self._init_optional_tensor(conditional.argmax(1) if conditional is not None else None, dtype=torch.LongTensor)

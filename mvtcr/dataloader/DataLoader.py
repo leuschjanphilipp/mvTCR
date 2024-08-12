@@ -67,7 +67,8 @@ def create_datasets(adata, obs_set_key, tcr_chain, use_vdj, use_citeseq,
     
     if use_citeseq:
         #TODO haniffa, normalize with clr
-        citeseq_train, citeseq_val = None, None
+        citeseq_train = adata.obsm["citeseq"][train_mask]
+        citeseq_val = adata.obsm["citeseq"][~train_mask]
     else:
         citeseq_train, citeseq_val = None, None
 

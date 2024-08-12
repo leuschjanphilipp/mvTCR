@@ -34,7 +34,7 @@ class MoEModelTorch(nn.Module):
             num_j_beta_labels = vdj_params["num_j_beta_labels"]
         
         if self.use_citeseq:
-            pass
+            citeseq_xdim = citeseq_params['xdim']
 
         hdim = joint_params['hdim']
         num_conditional_labels = joint_params['num_conditional_labels']
@@ -121,7 +121,25 @@ class MoEModelTorch(nn.Module):
 
         # CiteSeq modality
         if self.use_citeseq:
-            pass
+
+            self.citeseq_vae_encoder = MLP(citeseq_xdim + cond_input_dim, 
+                                       zdim * 2, 
+                                       shared_hidden, 
+                                       activation, 
+                                       'linear', 
+                                       dropout,
+                                       batch_norm, 
+                                       regularize_last_layer=False)
+            
+            #dont regularize last layer because its the prediction layer; if used with vdj_decoder, apply regularization in last layer of vdj_vae_decoder and disable it vdj_decoder
+            self.citeseq_vae_decoder = MLP(zdim + cond_dim, 
+                                       citeseq_xdim, 
+                                       shared_hidden[::-1], 
+                                       activation, 
+                                       activation, 
+                                       dropout,
+                                       batch_norm, 
+                                       regularize_last_layer=False)
 
 
     def forward(self, tcr, tcr_len, rna, vdj, citeseq, conditional=None):
@@ -200,12 +218,19 @@ class MoEModelTorch(nn.Module):
             mu["vdj"] = mu_vdj
             logvar["vdj"] = logvar_vdj
         
-        #TODO
         if self.use_citeseq:
-            # Encode CiteSeq
-            pass
             # Conditional
+            if conditional is not None and self.cond_input:
+                citeseq = torch.cat([citeseq, cond_emb_vec], dim=1)
+
             # Predict latent space
+            z_citeseq_ = self.citeseq_vae_encoder(citeseq) # shape=[batch_size, zdim*2]
+            mu_citeseq, logvar_citeseq = z_citeseq_[:, :z_citeseq_.shape[1] // 2], z_citeseq_[:, z_citeseq_.shape[1] // 2:] 
+            z_citeseq = self.reparameterize(mu_citeseq, logvar_citeseq)
+
+            z["citeseq"] = z_citeseq
+            mu["citeseq"] = mu_citeseq
+            logvar["citeseq"] = logvar_citeseq
 
         #Reconstruction
         predictions = {key: {} for key in z.keys()}
@@ -237,7 +262,8 @@ class MoEModelTorch(nn.Module):
 
             # CiteSeq
             if self.use_citeseq:
-                predictions["citeseq"][modality] = None  #TODO
+                f_citeseq = self.citeseq_vae_decoder(z_)
+                predictions["citeseq"][modality] = f_citeseq
 
         return z, mu, logvar, predictions
 
@@ -294,8 +320,9 @@ class MoEModel(VAEBaseModel):
     def __init__(self,
                  adata,
                  params_experiment,
-                 params_architecture):
-        super(MoEModel, self).__init__(adata, params_experiment, params_architecture)
+                 params_architecture,
+                 params_optimization):
+        super(MoEModel, self).__init__(adata, params_experiment, params_architecture, params_optimization)
         self.model_type = 'moe'
 
         self.params_tcr["tcr_chain"] = params_experiment["tcr_chain"]
@@ -329,8 +356,7 @@ class MoEModel(VAEBaseModel):
             self.params_vdj["num_j_beta_labels"] = adata.obs["VDJ_1_j_call"].max() + 1
         
         if self.use_citeseq:
-            #TODO
-            pass
+            self.params_citeseq['xdim'] = adata.obsm['citeseq'].shape[1]
 
         self.model = MoEModelTorch(self.params_tcr,
                                    self.params_rna,
@@ -388,15 +414,19 @@ class MoEModel(VAEBaseModel):
             losses["vdj"] = vdj_loss
 
         # CiteSeq loss
-        # TODO
         if self.use_citeseq:
-            losses["citeseq"] = None
+
+            citeseq_loss = [self.loss_function_citeseq(pred_modality, true["citeseq"]) for pred_modality in predictions["citeseq"].values()]
+            citeseq_loss = torch.stack(citeseq_loss).mean()
+            citeseq_loss *= self.loss_weights["citeseq"]
+            losses["citeseq"] = citeseq_loss
 
         return losses
 
     def calculate_kld_loss(self, mu, logvar, epoch):
 
         kld_loss = [self.loss_function_kld(mu_modality, logvar_modality) for mu_modality, logvar_modality in zip(mu.values(), logvar.values())]  
+        print("kld mods", kld_loss)
         kld_loss = sum(kld_loss) / len(kld_loss)
         kld_loss *= self.loss_weights["kld"] 
         kld_loss *= self.get_kl_annealing_factor(epoch)
